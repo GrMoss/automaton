@@ -19,6 +19,8 @@ import { generateSoulMd, installDefaultSkills } from "../setup/defaults.js";
 import { detectEnvironment } from "../setup/environment.js";
 import { isValidAddress } from "../identity/chain.js";
 import { DEFAULT_TREASURY_POLICY } from "../types.js";
+import { createConwayClient } from "../conway/client.js";
+import { getUsdcBalanceDetailed } from "../conway/x402.js";
 import { HttpError, cleanSecret, cleanUrl } from "./common.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -263,4 +265,53 @@ export async function stopAgent(force: boolean): Promise<{ stopped: boolean }> {
     await new Promise((r) => setTimeout(r, 200));
   }
   return { stopped: false };
+}
+
+// ─── Funding info ───────────────────────────────────────────────
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error("Quá thời gian chờ")), ms)),
+  ]);
+}
+
+/**
+ * Where to send funds and what the agent currently holds. Read-only: it never
+ * moves money. Each balance fails independently so one outage does not hide the other.
+ */
+export async function fundingInfo(): Promise<Record<string, unknown>> {
+  const config = loadConfig();
+  if (!config) throw new HttpError(409, "Chưa có cấu hình.");
+  const address = config.walletAddress;
+
+  const usdc = withTimeout(
+    getUsdcBalanceDetailed(address as `0x${string}`).then((r) => {
+      if (!r.ok) throw new Error(r.error || "Không đọc được số dư USDC");
+      return r.balance;
+    }),
+    12_000,
+  );
+  const credits = withTimeout(
+    (async () => {
+      const key = conwayKey();
+      if (!key) throw new Error("Chưa có Conway key");
+      const client = createConwayClient({ apiUrl: config.conwayApiUrl, apiKey: key, sandboxId: "" });
+      return client.getCreditsBalance();
+    })(),
+    12_000,
+  );
+  const [u, c] = await Promise.allSettled([usdc, credits]);
+  // First line only: viem errors run to many lines of request details.
+  const msg = (r: PromiseRejectedResult) =>
+    (r.reason instanceof Error ? r.reason.message : String(r.reason)).split("\n")[0].slice(0, 140);
+  return {
+    address,
+    network: "Base",
+    usdc: u.status === "fulfilled" ? u.value : null,
+    usdcError: u.status === "rejected" ? msg(u) : null,
+    creditsCents: c.status === "fulfilled" ? c.value : null,
+    creditsError: c.status === "rejected" ? msg(c) : null,
+    checkedAt: new Date().toISOString(),
+  };
 }

@@ -7,6 +7,9 @@
 #   scripts/automaton-docker.sh logs      follow the console/agent container logs
 #   scripts/automaton-docker.sh rebuild   rebuild the image after code changes, then up
 #   scripts/automaton-docker.sh url       print the console URL (contains a per-run token)
+#   scripts/automaton-docker.sh backup [dir]
+#                                         copy the agent's wallet.json (PRIVATE KEY) to dir
+#                                         (default ~/automaton-backups). Do this before funding.
 #
 # The agent's wallet and state live in the Docker volume "automaton-data", not on the host.
 set -euo pipefail
@@ -85,6 +88,35 @@ cmd_up() {
   command -v open >/dev/null && open "$url" || true
 }
 
+BACKUP_TMP=""
+cleanup_backup() { [ -n "$BACKUP_TMP" ] && docker rm -f "$BACKUP_TMP" >/dev/null 2>&1 || true; }
+
+cmd_backup() {
+  ensure_vm
+  image_exists || { echo "Image '$IMAGE' not built yet. Run: $0 up" >&2; exit 1; }
+  local dest="${1:-$HOME/automaton-backups}"
+  local parent abs
+  parent="$(cd "$(dirname "$dest")" 2>/dev/null && pwd)" || { echo "Parent folder of '$dest' does not exist." >&2; exit 1; }
+  abs="$parent/$(basename "$dest")"
+  case "$abs" in
+    "$REPO"|"$REPO"/*) echo "Refusing: do not keep the wallet backup inside the repo (it could be committed)." >&2; exit 1 ;;
+  esac
+  mkdir -p "$abs"; chmod 700 "$abs"
+  local file
+  file="$abs/wallet-$(date +%Y%m%d-%H%M%S).json"
+  BACKUP_TMP="automaton-backup-$$"
+  trap cleanup_backup EXIT
+  docker create --name "$BACKUP_TMP" -v "${VOLUME}:/home/node/.automaton" --entrypoint true "$IMAGE" >/dev/null
+  if ! ( umask 077; docker cp "$BACKUP_TMP:/home/node/.automaton/wallet.json" "$file" ) 2>/dev/null; then
+    rm -f "$file"
+    echo "No wallet found yet. Finish setup in the web console first." >&2
+    exit 1
+  fi
+  chmod 600 "$file"
+  echo "Saved: $file"
+  echo "This file holds the agent's PRIVATE KEY. Keep it somewhere safe and never share it."
+}
+
 case "${1:-up}" in
   up) cmd_up ;;
   down) ensure_vm; container_exists && docker stop "$NAME" >/dev/null && echo "Stopped." || echo "Not running." ;;
@@ -98,5 +130,6 @@ case "${1:-up}" in
     build
     container_exists && { docker rm -f "$NAME" >/dev/null; }
     cmd_up ;;
-  *) echo "Usage: $0 {up|down|status|logs|url|rebuild}" >&2; exit 2 ;;
+  backup) shift; cmd_backup "$@" ;;
+  *) echo "Usage: $0 {up|down|status|logs|url|rebuild|backup [dir]}" >&2; exit 2 ;;
 esac

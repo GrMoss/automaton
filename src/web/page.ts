@@ -157,6 +157,18 @@ export const PAGE_HTML = `<!doctype html>
           <div><button id="send">Gửi</button><span id="status"></span></div>
         </div>
       </section>
+      <section class="card hidden" id="fundCard"><h2>Nạp tiền</h2>
+        <div class="body">
+          <p class="meta">Địa chỉ ví của agent (mạng <b id="fundNet">Base</b>, token USDC):</p>
+          <pre id="fundAddr">...</pre>
+          <div><button id="copyAddr" class="small">Sao chép địa chỉ</button>
+            <button id="refreshFund" class="small ghost">Làm mới số dư</button>
+            <span class="meta" id="fundStatus"></span></div>
+          <div class="row"><span>Credit Conway</span><span id="fundCredits">—</span></div>
+          <div class="row"><span>USDC trong ví</span><span id="fundUsdc">—</span></div>
+          <p class="meta">Chỉ nạp số tiền bạn chấp nhận mất. Sao lưu file ví trước khi nạp (xem lệnh backup). Số dư chỉ cập nhật khi bạn bấm Làm mới.</p>
+        </div>
+      </section>
       <section class="card"><h2>Cài đặt model &amp; key</h2>
         <div class="body">
           <p class="meta" id="setErr" style="display:none"></p>
@@ -330,6 +342,7 @@ export const PAGE_HTML = `<!doctype html>
       renderLog(r[5].log);
       renderAgent(r[0].agentProcess, r[0].setup);
       renderOnboard(r[0].setup, r[0].agentProcess);
+      renderFundVisibility(r[0].setup);
     }).catch(function (e) {
       fail(token ? "Không tải được dữ liệu: " + e.message : "Thiếu token. Mở lại bằng đường dẫn in ra ở terminal.");
     });
@@ -460,6 +473,35 @@ export const PAGE_HTML = `<!doctype html>
     var stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
     pre.textContent = text || "Chưa có log.";
     if (stick) pre.scrollTop = pre.scrollHeight;
+  }
+
+
+  // ─── Funding ─────────────────────────────────────────────────
+  var fundCard = document.getElementById("fundCard");
+  var fundShown = false;
+  function loadFunding() {
+    var st = document.getElementById("fundStatus");
+    st.textContent = "Đang đọc...";
+    api("/api/funding").then(function (f) {
+      document.getElementById("fundAddr").textContent = f.address;
+      document.getElementById("fundNet").textContent = f.network;
+      document.getElementById("fundCredits").textContent = f.creditsCents === null ? ("không đọc được: " + f.creditsError) : cents(f.creditsCents);
+      document.getElementById("fundUsdc").textContent = f.usdc === null ? ("không đọc được: " + f.usdcError) : (Number(f.usdc).toFixed(2) + " USDC");
+      st.textContent = "Cập nhật " + new Date().toLocaleTimeString();
+    }).catch(function (e) { st.textContent = "Lỗi: " + e.message; });
+  }
+  document.getElementById("refreshFund").addEventListener("click", loadFunding);
+  document.getElementById("copyAddr").addEventListener("click", function () {
+    var text = document.getElementById("fundAddr").textContent;
+    var st = document.getElementById("fundStatus");
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { st.textContent = "Đã sao chép."; },
+        function () { st.textContent = "Không sao chép được, hãy chọn và copy thủ công."; });
+    } else { st.textContent = "Trình duyệt không cho sao chép, hãy copy thủ công."; }
+  });
+  function renderFundVisibility(setup) {
+    fundCard.classList.toggle("hidden", !setup.hasConfig);
+    if (setup.hasConfig && !fundShown) { fundShown = true; loadFunding(); }
   }
 
   // ─── Settings ────────────────────────────────────────────────

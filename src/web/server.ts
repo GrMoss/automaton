@@ -27,6 +27,7 @@ import {
   saveManualConwayKey,
   agentStatus,
   agentLogs,
+  fundingInfo,
   startAgent,
   stopAgent,
 } from "./setup.js";
@@ -416,6 +417,8 @@ const server = http.createServer(async (req, res) => {
           return send(res, 200, settingsView());
         case "/api/setup":
           return send(res, 200, setupStatus());
+        case "/api/funding":
+          return send(res, 200, await fundingInfo());
         case "/api/agent":
           return send(res, 200, agentStatus());
         case "/api/agent/logs":
