@@ -258,6 +258,36 @@ describe("InferenceRouter", () => {
       expect(model).not.toBeNull();
       expect(model!.modelId).toBe("gpt-5-mini");
     });
+
+    describe("explicit user model choice", () => {
+      const claudeRouter = () =>
+        new InferenceRouter(
+          db,
+          registry,
+          new InferenceBudgetTracker(db, {
+            ...DEFAULT_MODEL_STRATEGY_CONFIG,
+            inferenceModel: "claude-sonnet-5-5",
+          }),
+        );
+
+      it("overrides the default matrix for agent turns", () => {
+        expect(claudeRouter().selectModel("normal", "agent_turn")!.modelId).toBe("claude-sonnet-5-5");
+        expect(claudeRouter().selectModel("critical", "agent_turn")!.modelId).toBe("claude-sonnet-5-5");
+      });
+
+      it("keeps heartbeat triage on the matrix model", () => {
+        expect(claudeRouter().selectModel("normal", "heartbeat_triage")!.modelId).toBe("gpt-5-mini");
+      });
+
+      it("never selects a paid model for the dead tier", () => {
+        expect(claudeRouter().selectModel("dead", "agent_turn")).toBeNull();
+      });
+
+      it("falls back to the matrix when the chosen model is disabled", () => {
+        registry.setEnabled("claude-sonnet-5-5", false);
+        expect(claudeRouter().selectModel("normal", "agent_turn")!.modelId).toBe("gpt-5.2");
+      });
+    });
   });
 
   describe("route", () => {

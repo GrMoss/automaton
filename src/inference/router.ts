@@ -21,6 +21,7 @@ import type {
 import { ModelRegistry } from "./registry.js";
 import { InferenceBudgetTracker } from "./budget.js";
 import { DEFAULT_ROUTING_MATRIX, TASK_TIMEOUTS } from "./types.js";
+import { DEFAULT_MODEL_STRATEGY_CONFIG } from "../types.js";
 
 type Database = BetterSqlite3.Database;
 
@@ -195,6 +196,22 @@ export class InferenceRouter {
     };
 
     const tierRank = TIER_ORDER[tier] ?? 0;
+
+    // 0. An explicit user choice (e.g. via --pick-model) beats the default
+    //    matrix, which only lists OpenAI models. Without this, picking a
+    //    Claude model would be silently ignored while GPT models are enabled.
+    //    Heartbeat triage stays on the cheap matrix model, and a dead tier
+    //    never gets a paid model.
+    const chosenId = this.budget.config.inferenceModel;
+    if (
+      chosenId &&
+      chosenId !== DEFAULT_MODEL_STRATEGY_CONFIG.inferenceModel &&
+      taskType !== "heartbeat_triage" &&
+      tier !== "dead"
+    ) {
+      const chosen = this.registry.get(chosenId);
+      if (chosen && chosen.enabled) return chosen;
+    }
 
     // 1. Try routing-matrix candidates
     const preference = this.getPreference(tier, taskType);

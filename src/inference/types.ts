@@ -132,6 +132,50 @@ export const STATIC_MODEL_BASELINE: Omit<ModelEntry, "lastSeen" | "createdAt" | 
     parameterStyle: "max_completion_tokens",
     enabled: true,
   },
+  // Anthropic models. Pricing below is an estimate (Sonnet/Haiku/Opus class);
+  // verify against the Anthropic price list before relying on cost tracking.
+  {
+    modelId: "claude-sonnet-5-5",
+    provider: "anthropic",
+    displayName: "Claude Sonnet 5.5",
+    tierMinimum: "normal",
+    costPer1kInput: 30,    // ~$3.00/M (estimate)
+    costPer1kOutput: 150,  // ~$15.00/M (estimate)
+    maxTokens: 8192,
+    contextWindow: 200000,
+    supportsTools: true,
+    supportsVision: true,
+    parameterStyle: "max_tokens",
+    enabled: true,
+  },
+  {
+    modelId: "claude-haiku-5-5",
+    provider: "anthropic",
+    displayName: "Claude Haiku 5.5",
+    tierMinimum: "critical",
+    costPer1kInput: 10,    // ~$1.00/M (estimate)
+    costPer1kOutput: 50,   // ~$5.00/M (estimate)
+    maxTokens: 8192,
+    contextWindow: 200000,
+    supportsTools: true,
+    supportsVision: true,
+    parameterStyle: "max_tokens",
+    enabled: true,
+  },
+  {
+    modelId: "claude-opus-5-5",
+    provider: "anthropic",
+    displayName: "Claude Opus 5.5",
+    tierMinimum: "normal",
+    costPer1kInput: 50,    // ~$5.00/M (estimate)
+    costPer1kOutput: 250,  // ~$25.00/M (estimate)
+    maxTokens: 8192,
+    contextWindow: 200000,
+    supportsTools: true,
+    supportsVision: true,
+    parameterStyle: "max_tokens",
+    enabled: true,
+  },
 ];
 
 // === Default Routing Matrix ===
