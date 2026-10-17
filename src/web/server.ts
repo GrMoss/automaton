@@ -10,6 +10,7 @@
  */
 
 import http from "node:http";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -18,6 +19,17 @@ import { ulid } from "ulid";
 import { getAutomatonDir } from "../identity/wallet.js";
 import { PAGE_HTML } from "./page.js";
 import { STATIC_MODEL_BASELINE } from "../inference/types.js";
+import { HttpError, cleanSecret, cleanUrl } from "./common.js";
+import {
+  setupStatus,
+  createInitialConfig,
+  provisionConway,
+  saveManualConwayKey,
+  agentStatus,
+  agentLogs,
+  startAgent,
+  stopAgent,
+} from "./setup.js";
 
 const HOST = "127.0.0.1";
 const MAX_MESSAGE_CHARS = 4000;
@@ -43,13 +55,23 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
   console.error(`Invalid --port: ${argValue("--port")}`);
   process.exit(1);
 }
-if (!fs.existsSync(dbPath)) {
-  console.error(`Database not found: ${dbPath}\nRun the automaton once first (node dist/index.js --run).`);
-  process.exit(1);
-}
 
-const readDb = new Database(dbPath, { readonly: true, fileMustExist: true });
-readDb.pragma("busy_timeout = 3000");
+/**
+ * The database only exists after the agent has run once, so the read
+ * connection is opened lazily. Before that, every query returns nothing.
+ */
+let readDbHandle: Database.Database | null = null;
+function readDb(): Database.Database | null {
+  if (readDbHandle) return readDbHandle;
+  if (!fs.existsSync(dbPath)) return null;
+  try {
+    readDbHandle = new Database(dbPath, { readonly: true, fileMustExist: true });
+    readDbHandle.pragma("busy_timeout = 3000");
+  } catch {
+    readDbHandle = null;
+  }
+  return readDbHandle;
+}
 
 /** Only these config fields leave the process. Never keys or wallet secrets. */
 function publicConfig(): Record<string, unknown> {
@@ -72,7 +94,7 @@ function publicConfig(): Record<string, unknown> {
 
 function rows(sql: string, ...params: unknown[]): unknown[] {
   try {
-    return readDb.prepare(sql).all(...params);
+    return readDb()?.prepare(sql).all(...params) ?? [];
   } catch {
     return []; // table may not exist in older schema versions
   }
@@ -80,7 +102,7 @@ function rows(sql: string, ...params: unknown[]): unknown[] {
 
 function one<T>(sql: string, ...params: unknown[]): T | undefined {
   try {
-    return readDb.prepare(sql).get(...params) as T | undefined;
+    return readDb()?.prepare(sql).get(...params) as T | undefined;
   } catch {
     return undefined;
   }
@@ -119,7 +141,9 @@ function overview(): unknown {
     )?.n ?? 0;
   return {
     config: cfg,
-    agentState: kv("agent_state") ?? "unknown",
+    agentState: kv("agent_state") ?? "not_started",
+    agentProcess: agentStatus(),
+    setup: setupStatus(),
     sleepUntil: kv("sleep_until"),
     lastHeartbeat: parseJson(kv("last_heartbeat_ping"), null),
     turnCount,
@@ -162,6 +186,9 @@ function sendMessage(content: string): { id: string } {
   }
   recentMessages.push(now);
 
+  if (!fs.existsSync(dbPath)) {
+    throw new HttpError(409, "Agent chưa chạy lần nào nên chưa có hộp thư. Hãy bấm Chạy agent trước.");
+  }
   const cfg = publicConfig();
   const from = typeof cfg.creatorAddress === "string" && cfg.creatorAddress ? cfg.creatorAddress : "web-console";
   const id = ulid();
@@ -190,7 +217,6 @@ function sendMessage(content: string): { id: string } {
 // same file the CLI wizard writes, and are never logged.
 
 const configPath = path.join(path.dirname(dbPath), "automaton.json");
-const MAX_SECRET_CHARS = 400;
 const settingsWrites: number[] = [];
 
 function readConfigFile(): Record<string, unknown> {
@@ -232,16 +258,6 @@ function settingsView(): unknown {
   };
 }
 
-function cleanSecret(value: unknown, prefix: string, label: string): string | null {
-  if (value === null || value === "") return null; // clear
-  if (typeof value !== "string") throw new HttpError(400, `${label} không hợp lệ`);
-  const v = value.trim();
-  if (v.length > MAX_SECRET_CHARS || /\s/.test(v) || !v.startsWith(prefix)) {
-    throw new HttpError(400, `${label} phải bắt đầu bằng ${prefix} và không chứa khoảng trắng`);
-  }
-  return v;
-}
-
 function updateSettings(body: Record<string, unknown>): { changed: string[] } {
   const now = Date.now();
   while (settingsWrites.length && now - settingsWrites[0] > 60_000) settingsWrites.shift();
@@ -264,21 +280,9 @@ function updateSettings(body: Record<string, unknown>): { changed: string[] } {
     changed.push("openaiApiKey");
   }
   if ("ollamaBaseUrl" in body) {
-    const u = body.ollamaBaseUrl;
-    if (u === null || u === "") {
-      delete config.ollamaBaseUrl;
-    } else {
-      let parsed: URL;
-      try {
-        parsed = new URL(String(u));
-      } catch {
-        throw new HttpError(400, "Ollama URL không hợp lệ");
-      }
-      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-        throw new HttpError(400, "Ollama URL phải là http hoặc https");
-      }
-      config.ollamaBaseUrl = parsed.origin;
-    }
+    const u = cleanUrl(body.ollamaBaseUrl);
+    if (u === null) delete config.ollamaBaseUrl;
+    else config.ollamaBaseUrl = u;
     changed.push("ollamaBaseUrl");
   }
   if ("inferenceModel" in body) {
@@ -300,12 +304,6 @@ function updateSettings(body: Record<string, unknown>): { changed: string[] } {
 }
 
 // ─── HTTP plumbing ──────────────────────────────────────────────
-
-class HttpError extends Error {
-  constructor(public status: number, message: string) {
-    super(message);
-  }
-}
 
 function tokenOk(supplied: string | undefined): boolean {
   if (!supplied) return false;
@@ -360,6 +358,19 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   });
 }
 
+async function jsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  if (!(req.headers["content-type"] ?? "").startsWith("application/json")) {
+    throw new HttpError(415, "Expected application/json");
+  }
+  const raw = await readBody(req);
+  if (!raw.trim()) return {};
+  const body = parseJson(raw, null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new HttpError(400, "Body không hợp lệ");
+  }
+  return body as Record<string, unknown>;
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     if (!hostOk(req)) throw new HttpError(403, "Forbidden host");
@@ -401,6 +412,12 @@ const server = http.createServer(async (req, res) => {
           );
         case "/api/settings":
           return send(res, 200, settingsView());
+        case "/api/setup":
+          return send(res, 200, setupStatus());
+        case "/api/agent":
+          return send(res, 200, agentStatus());
+        case "/api/agent/logs":
+          return send(res, 200, { log: agentLogs(clampLimit(q.get("lines"), 120, 500)) });
         case "/api/children":
           return send(
             res,
@@ -415,11 +432,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/api/message") {
-      if (!(req.headers["content-type"] ?? "").startsWith("application/json")) {
-        throw new HttpError(415, "Expected application/json");
-      }
-      const body = parseJson(await readBody(req), null) as { content?: unknown } | null;
-      const content = typeof body?.content === "string" ? body.content.trim() : "";
+      const body = await jsonBody(req);
+      const content = typeof body.content === "string" ? body.content.trim() : "";
       if (!content) throw new HttpError(400, "Message is empty");
       if (content.length > MAX_MESSAGE_CHARS) {
         throw new HttpError(400, `Message too long (max ${MAX_MESSAGE_CHARS})`);
@@ -427,15 +441,25 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, sendMessage(content));
     }
 
-    if (req.method === "POST" && url.pathname === "/api/settings") {
-      if (!(req.headers["content-type"] ?? "").startsWith("application/json")) {
-        throw new HttpError(415, "Expected application/json");
+    if (req.method === "POST") {
+      const body = await jsonBody(req);
+      switch (url.pathname) {
+        case "/api/settings":
+          return send(res, 200, updateSettings(body));
+        case "/api/setup/config":
+          return send(res, 200, await createInitialConfig(body));
+        case "/api/setup/provision":
+          return send(res, 200, await provisionConway());
+        case "/api/setup/conway-key":
+          saveManualConwayKey(body.key);
+          return send(res, 200, { ok: true });
+        case "/api/agent/start":
+          return send(res, 200, await startAgent());
+        case "/api/agent/stop":
+          return send(res, 200, await stopAgent(body.force === true));
+        default:
+          throw new HttpError(404, "Not found");
       }
-      const body = parseJson(await readBody(req), null);
-      if (!body || typeof body !== "object" || Array.isArray(body)) {
-        throw new HttpError(400, "Body không hợp lệ");
-      }
-      return send(res, 200, updateSettings(body as Record<string, unknown>));
     }
 
     throw new HttpError(405, "Method not allowed");
@@ -450,12 +474,15 @@ server.listen(port, HOST, () => {
   console.log(`Automaton console: http://localhost:${port}/#${token}`);
   console.log(`Database: ${dbPath}`);
   console.log("Bound to 127.0.0.1 only. The token in the URL fragment is required for the API.");
+  if (process.argv.includes("--open") && process.platform === "darwin") {
+    execFile("open", [`http://localhost:${port}/#${token}`], () => {});
+  }
 });
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
     server.close();
-    readDb.close();
+    readDbHandle?.close();
     process.exit(0);
   });
 }

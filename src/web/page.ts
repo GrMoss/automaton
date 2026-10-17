@@ -77,6 +77,16 @@ export const PAGE_HTML = `<!doctype html>
   .chip.on { color: var(--ok); border-color: var(--ok); }
   button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); margin-left: 6px; }
   #setStatus { margin-left: 8px; }
+  .steps { list-style: none; padding: 0; margin: 0 0 8px; display: grid; gap: 4px; }
+  .steps li { display: flex; gap: 8px; align-items: center; }
+  .dot { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line); display: inline-block; flex: none; }
+  .dot.ok { background: var(--ok); border-color: var(--ok); }
+  .hidden { display: none !important; }
+  button.small { margin: 0; padding: 4px 12px; font-size: 13px; }
+  button.danger { background: var(--bad); }
+  .or { color: var(--muted); font-size: 12px; margin: 10px 0 2px; }
+  #log { max-height: 260px; overflow: auto; }
+  .lead { margin: 0 0 8px; color: var(--muted); }
   #banner { display: none; padding: 10px 16px; background: var(--bad); color: #fff; }
 </style>
 </head>
@@ -87,9 +97,56 @@ export const PAGE_HTML = `<!doctype html>
   <span id="state" class="pill">...</span>
   <span class="meta" id="model"></span>
   <span class="spacer"></span>
+  <span class="pill" id="agentPill">agent: ...</span>
+  <button id="agentBtn" class="small" disabled>...</button>
   <span class="meta" id="updated"></span>
 </header>
 <main>
+  <section class="card hidden" id="onboard"><h2>Bắt đầu</h2>
+    <div class="body">
+      <ol class="steps">
+        <li><span class="dot" id="dotCfg"></span><span>1. Tạo cấu hình và ví cho agent</span></li>
+        <li><span class="dot" id="dotKey"></span><span>2. Kết nối Conway (API key)</span></li>
+        <li><span class="dot" id="dotRun"></span><span>3. Chạy agent</span></li>
+      </ol>
+      <p class="meta" id="obErr" style="display:none"></p>
+      <div id="cfgForm" class="hidden">
+        <label class="field">Tên agent
+          <input id="obName" type="text" maxlength="64" autocomplete="off" placeholder="vd: my-automaton">
+        </label>
+        <label class="field">Genesis prompt (nhiệm vụ gốc của agent)
+          <textarea id="obGenesis" maxlength="8000" placeholder="Mô tả agent là ai và nên làm gì. Nên chọn nhiệm vụ vô hại."></textarea>
+        </label>
+        <label class="field">Địa chỉ ví của bạn (creator, 0x...)
+          <input id="obCreator" type="text" autocomplete="off" spellcheck="false" placeholder="0x... (dùng ví không có tài sản)">
+        </label>
+        <label class="field">Anthropic API key (tùy chọn)
+          <input id="obAnthropic" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-...">
+        </label>
+        <label class="field">OpenAI API key (tùy chọn)
+          <input id="obOpenai" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...">
+        </label>
+        <label class="field">Ollama URL (tùy chọn)
+          <input id="obOllama" type="text" autocomplete="off" spellcheck="false" placeholder="http://localhost:11434">
+        </label>
+        <button id="obCreate">Tạo cấu hình &amp; ví</button>
+        <p class="meta">Ví mới được tạo trên máy bạn. Hạn mức chi tiêu dùng mặc định (chỉnh trong file cấu hình nếu cần).</p>
+      </div>
+      <div id="keyForm" class="hidden">
+        <p class="lead">Agent cần một Conway API key mới chạy được. Có hai cách:</p>
+        <button id="obProvision">Đăng ký tự động với Conway</button>
+        <p class="or">hoặc nhập key bạn đã có</p>
+        <label class="field">Conway API key
+          <input id="obConwayKey" type="password" autocomplete="off" spellcheck="false" placeholder="cnwy_k_...">
+        </label>
+        <button id="obSaveKey" class="ghost" style="margin-left:0">Lưu key</button>
+      </div>
+      <div id="runForm" class="hidden">
+        <p class="lead">Mọi thứ đã sẵn sàng.</p>
+        <button id="obRun">Chạy agent</button>
+      </div>
+    </div>
+  </section>
   <section class="stats" id="stats"></section>
   <div class="cols">
     <section class="card"><h2>Hoạt động gần đây</h2><div class="body" id="turns"></div></section>
@@ -128,6 +185,7 @@ export const PAGE_HTML = `<!doctype html>
       <section class="card"><h2>Agent con</h2><div class="body" id="children"></div></section>
     </div>
   </div>
+  <section class="card"><h2>Log agent</h2><div class="body"><pre id="log">Chưa có log.</pre></div></section>
 </main>
 <script>
 (function () {
@@ -265,10 +323,13 @@ export const PAGE_HTML = `<!doctype html>
   function refresh() {
     Promise.all([
       api("/api/overview"), api("/api/turns?limit=30"), api("/api/inbox?limit=12"),
-      api("/api/policy?limit=15"), api("/api/children")
+      api("/api/policy?limit=15"), api("/api/children"), api("/api/agent/logs?lines=80")
     ]).then(function (r) {
       banner.style.display = "none";
       renderOverview(r[0]); renderTurns(r[1]); renderInbox(r[2]); renderPolicy(r[3]); renderChildren(r[4]);
+      renderLog(r[5].log);
+      renderAgent(r[0].agentProcess, r[0].setup);
+      renderOnboard(r[0].setup, r[0].agentProcess);
     }).catch(function (e) {
       fail(token ? "Không tải được dữ liệu: " + e.message : "Thiếu token. Mở lại bằng đường dẫn in ra ở terminal.");
     });
@@ -294,6 +355,112 @@ export const PAGE_HTML = `<!doctype html>
       status.textContent = "Lỗi: " + e.message;
     }).then(function () { send.disabled = false; });
   });
+
+
+  // ─── Onboarding + agent control ──────────────────────────────
+  var obErr = document.getElementById("obErr");
+  var onboard = document.getElementById("onboard");
+  var agentBtn = document.getElementById("agentBtn");
+  var agentPill = document.getElementById("agentPill");
+  var lastAgent = { running: false };
+
+  function obFail(e) { obErr.style.display = "block"; obErr.className = "err"; obErr.textContent = e.message; }
+  function obClear() { obErr.style.display = "none"; }
+  function dot(id, on) { document.getElementById(id).className = "dot" + (on ? " ok" : ""); }
+
+  function renderOnboard(setup, agent) {
+    var ready = setup.hasConfig && setup.hasConwayKey && agent.running;
+    onboard.classList.toggle("hidden", ready);
+    dot("dotCfg", setup.hasConfig);
+    dot("dotKey", setup.hasConwayKey);
+    dot("dotRun", agent.running);
+    document.getElementById("cfgForm").classList.toggle("hidden", setup.hasConfig);
+    document.getElementById("keyForm").classList.toggle("hidden", !setup.hasConfig || setup.hasConwayKey);
+    document.getElementById("runForm").classList.toggle("hidden", !(setup.hasConfig && setup.hasConwayKey && !agent.running));
+  }
+
+  function renderAgent(agent, setup) {
+    lastAgent = agent;
+    agentPill.textContent = agent.running ? "agent: đang chạy" : "agent: đã dừng";
+    agentPill.className = "pill " + (agent.running ? "running" : "dead");
+    agentBtn.textContent = agent.running ? "Dừng" : "Chạy agent";
+    agentBtn.className = "small" + (agent.running ? " danger" : "");
+    agentBtn.disabled = !agent.running && !(setup.hasConfig && setup.hasConwayKey);
+  }
+
+  function startAgentNow(btn) {
+    obClear();
+    if (btn) btn.disabled = true;
+    return api("/api/agent/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+      .then(refresh).catch(obFail).then(function () { if (btn) btn.disabled = false; });
+  }
+
+  agentBtn.addEventListener("click", function () {
+    agentBtn.disabled = true;
+    var p;
+    if (lastAgent.running) {
+      p = api("/api/agent/stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+        .then(function (r) {
+          if (!r.stopped && confirm("Agent chưa dừng sau vài giây. Buộc dừng ngay?")) {
+            return api("/api/agent/stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force: true }) });
+          }
+        });
+    } else {
+      p = api("/api/agent/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    }
+    p.then(refresh).catch(function (e) { onboard.classList.remove("hidden"); obFail(e); });
+  });
+
+  document.getElementById("obRun").addEventListener("click", function (ev) { startAgentNow(ev.target); });
+
+  document.getElementById("obCreate").addEventListener("click", function (ev) {
+    var btn = ev.target;
+    obClear();
+    btn.disabled = true;
+    api("/api/setup/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: document.getElementById("obName").value,
+        genesisPrompt: document.getElementById("obGenesis").value,
+        creatorAddress: document.getElementById("obCreator").value,
+        anthropicApiKey: document.getElementById("obAnthropic").value,
+        openaiApiKey: document.getElementById("obOpenai").value,
+        ollamaBaseUrl: document.getElementById("obOllama").value
+      })
+    }).then(function () {
+      ["obAnthropic", "obOpenai"].forEach(function (id) { document.getElementById(id).value = ""; });
+      refresh(); loadSettings(true);
+    }).catch(obFail).then(function () { btn.disabled = false; });
+  });
+
+  document.getElementById("obProvision").addEventListener("click", function (ev) {
+    var btn = ev.target;
+    if (!confirm("Việc này ký một thông điệp bằng ví của agent và gửi tới api.conway.tech để tạo API key. Tiếp tục?")) return;
+    obClear();
+    btn.disabled = true;
+    api("/api/setup/provision", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+      .then(refresh).catch(obFail).then(function () { btn.disabled = false; });
+  });
+
+  document.getElementById("obSaveKey").addEventListener("click", function (ev) {
+    var btn = ev.target;
+    var input = document.getElementById("obConwayKey");
+    obClear();
+    btn.disabled = true;
+    api("/api/setup/conway-key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: input.value })
+    }).then(function () { input.value = ""; refresh(); }).catch(obFail).then(function () { btn.disabled = false; });
+  });
+
+  function renderLog(text) {
+    var pre = document.getElementById("log");
+    var stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+    pre.textContent = text || "Chưa có log.";
+    if (stick) pre.scrollTop = pre.scrollHeight;
+  }
 
   // ─── Settings ────────────────────────────────────────────────
   var setErr = document.getElementById("setErr");

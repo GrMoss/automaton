@@ -41,6 +41,7 @@
     "build": "tsc && pnpm -r build",
     "dev": "tsx watch src/index.ts",
     "web": "node dist/web/server.js",
+    "start": "node dist/web/server.js --open",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "test:coverage": "vitest run --coverage",
