@@ -61,12 +61,11 @@ function saveConfig(apiKey: string, walletAddress: string): void {
  * 5. Create API key
  * 6. Save to config.json
  */
-export async function provision(
-  apiUrl?: string,
-  solanaIdentity?: ChainIdentity,
+async function provisionOnce(
+  url: string,
+  solanaIdentity: ChainIdentity | undefined,
+  progress: { keyRequested: boolean },
 ): Promise<ProvisionResult> {
-  const url = apiUrl || process.env.CONWAY_API_URL || DEFAULT_API_URL;
-
   // 1. Load wallet
   const { account, chainIdentity, chainType } = await getWallet();
   const identity = solanaIdentity || chainIdentity;
@@ -123,10 +122,14 @@ export async function provision(
     verifyBody.chain_type = "solana";
   }
 
+  // retries: 0 — the nonce is single-use, so blindly re-sending the same signed
+  // message after a timeout or 5xx would always fail with "Invalid or expired
+  // nonce". The caller restarts the whole flow with a fresh nonce instead.
   const verifyResp = await httpClient.request(`${url}/v1/auth/verify`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(verifyBody),
+    retries: 0,
   });
 
   if (!verifyResp.ok) {
@@ -141,6 +144,7 @@ export async function provision(
   };
 
   // 5. Create API key
+  progress.keyRequested = true; // past this point a retry could create a duplicate key
   const keyResp = await httpClient.request(`${url}/v1/auth/api-keys`, {
     method: "POST",
     headers: {
@@ -148,6 +152,7 @@ export async function provision(
       Authorization: `Bearer ${access_token}`,
     },
     body: JSON.stringify({ name: "conway-automaton" }),
+    retries: 0,
   });
 
   if (!keyResp.ok) {
@@ -165,6 +170,39 @@ export async function provision(
   saveConfig(key, address);
 
   return { apiKey: key, walletAddress: address, keyPrefix: key_prefix };
+}
+
+const PROVISION_ATTEMPTS = 3;
+
+/** Failures worth restarting the flow for: stale nonce, 5xx/429, network errors. */
+function isTransientProvisionError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /nonce|: (429|5\d\d)\b|fetch failed|timed out|aborted|ECONN|ETIMEDOUT/i.test(msg);
+}
+
+/**
+ * Run the SIWE provisioning flow, restarting it from a fresh nonce when it fails
+ * for a transient reason before an API key was requested.
+ */
+export async function provision(
+  apiUrl?: string,
+  solanaIdentity?: ChainIdentity,
+): Promise<ProvisionResult> {
+  const url = apiUrl || process.env.CONWAY_API_URL || DEFAULT_API_URL;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= PROVISION_ATTEMPTS; attempt++) {
+    const progress = { keyRequested: false };
+    try {
+      return await provisionOnce(url, solanaIdentity, progress);
+    } catch (err) {
+      lastError = err;
+      if (progress.keyRequested || !isTransientProvisionError(err) || attempt === PROVISION_ATTEMPTS) {
+        throw err;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+    }
+  }
+  throw lastError;
 }
 
 /**
