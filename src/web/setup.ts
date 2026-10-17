@@ -165,6 +165,13 @@ function isAgentProcess(pid: number): boolean {
     return false;
   }
   try {
+    // Linux (incl. slim containers without procps): read the command line directly.
+    const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, "utf-8").split("\0").join(" ");
+    return cmd.includes(agentEntry);
+  } catch {
+    // macOS has no /proc.
+  }
+  try {
     const cmd = execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf-8" });
     return cmd.includes(agentEntry);
   } catch {

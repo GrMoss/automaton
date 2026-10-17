@@ -1,0 +1,12 @@
+node_modules
+**/node_modules
+dist
+**/dist
+.git
+.env
+*.log
+*.db
+*.db-wal
+*.db-shm
+.automaton
+.DS_Store

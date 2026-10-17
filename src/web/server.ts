@@ -31,7 +31,9 @@ import {
   stopAgent,
 } from "./setup.js";
 
-const HOST = "127.0.0.1";
+// Inside a container the console must listen on 0.0.0.0 so the published port
+// is reachable; the host side stays loopback-only (docker run -p 127.0.0.1:...).
+const HOST = process.env.AUTOMATON_CONSOLE_HOST || "127.0.0.1";
 const MAX_MESSAGE_CHARS = 4000;
 const MAX_BODY_BYTES = 16 * 1024;
 const MESSAGE_LIMIT_PER_MIN = 10;
@@ -473,7 +475,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(port, HOST, () => {
   console.log(`Automaton console: http://localhost:${port}/#${token}`);
   console.log(`Database: ${dbPath}`);
-  console.log("Bound to 127.0.0.1 only. The token in the URL fragment is required for the API.");
+  console.log(`Listening on ${HOST}. The token in the URL fragment is required for the API.`);
   if (process.argv.includes("--open") && process.platform === "darwin") {
     execFile("open", [`http://localhost:${port}/#${token}`], () => {});
   }
